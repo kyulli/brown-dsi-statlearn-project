@@ -1,14 +1,16 @@
 ---
 title: "Final Project Report"
-subtitle: "DATA2020 Statistical Learning"
 author:
-  - Jiaxin Guan
-  - Qiuli Lai
-  - Yitong Liu
+- Jiaxin Guan
+- Qiuli Lai
+- Yitong Liu
 date: "April 2026"
 output:
+  html_document:
+    df_print: paged
   pdf_document:
     latex_engine: xelatex
+subtitle: DATA2020 Statistical Learning
 fontsize: 11pt
 geometry: margin=1in
 ---
@@ -163,6 +165,49 @@ preds312 <- load_all_predictors(index312$ID, pred_dir_312)
 cat("Loaded predictor files:", length(preds312), "/ 312\n")
 ```
 
+
+```{r helper-get-at-time}
+# For a given movie-time t, extract each movie's cumulative predictor values
+# and join to the index to get Revenue and Theaters.
+# Returns a data frame with columns: Revenue, Theaters, V, U, R, E.
+get_at_time <- function(t, preds, index) {
+  rows <- lapply(seq_len(nrow(index)), function(i) {
+    id <- as.character(index$ID[i])
+    d  <- preds[[id]]
+
+    if (is.null(d)) {
+      v <- u <- r <- e <- NA_real_
+    } else {
+      day_col <- as.numeric(d[[1]])
+      idx <- which(day_col <= t)
+
+      if (length(idx) == 0) {
+        v <- u <- r <- e <- 0
+      } else {
+        row_idx <- idx[length(idx)]
+
+        v <- d$Views[row_idx]
+        u <- d$Users[row_idx]
+        r <- d$Rigor[row_idx]
+        e <- d$Edits[row_idx]
+      }
+    }
+
+    data.frame(
+      ID = index$ID[i],
+      Revenue = index$Revenue[i],
+      Theaters = index$Theaters[i],
+      V = v,
+      U = u,
+      R = r,
+      E = e
+    )
+  })
+
+  do.call(rbind, rows)
+}
+
+```
 ------------------------------------------------------------------------
 
 ## 2.2 Extension Methods
@@ -384,11 +429,312 @@ main_p +
   annotation_custom(
     grob = ggplotGrob(inset_p),
     xmin = -400,
-    xmax = -200,  
+    xmax = -200,
     ymin = 0.78,
     ymax = 1
   )
 ```
+
+
+```{r figure3, fig.cap="Figure 3 Replication: Cross-validated R² of the linear regression model as a function of prediction time (movie time, days). Each line corresponds to a different set of input variables. The dashed gray line shows the benchmark model based solely on number of theaters (T). 10-fold cross-validation on n=312 movies.", fig.width=7, fig.height=4.5}
+
+set.seed(2013)
+base_folds_312 <- sample(rep(1:10, length.out = nrow(index312)))
+
+# 10-fold CV R^2 computed fold-by-fold, then averaged across folds
+# This is closer to the paper's wording: average over the 10 permutations.
+set.seed(2013)
+base_folds_312 <- sample(rep(1:10, length.out = nrow(index312)))
+
+cv_r2_fixedfolds <- function(fml, dat, fold_id) {
+  used <- intersect(all.vars(fml), colnames(dat))
+  keep <- complete.cases(dat[, used, drop = FALSE])
+
+  dat2 <- dat[keep, , drop = FALSE]
+  fold2 <- fold_id[keep]
+
+  # IMPORTANT: use one common mean across the whole sample
+  ybar_all <- mean(dat2$Revenue)
+
+  fold_r2 <- c()
+
+  for (fold in sort(unique(fold2))) {
+    train_dat <- dat2[fold2 != fold, , drop = FALSE]
+    test_dat  <- dat2[fold2 == fold, , drop = FALSE]
+
+    if (nrow(train_dat) < 2 || nrow(test_dat) < 2) next
+
+    fit <- lm(fml, data = train_dat)
+    pred <- predict(fit, newdata = test_dat)
+
+    y <- test_dat$Revenue
+
+    ss_res <- sum((y - pred)^2)
+    ss_tot <- sum((y - ybar_all)^2)
+
+    if (ss_tot > 0) {
+      fold_r2 <- c(fold_r2, 1 - ss_res / ss_tot)
+    }
+  }
+
+  mean(fold_r2, na.rm = TRUE)
+}
+
+model_specs <- list(
+  "{T}" = Revenue ~ Theaters,
+  "{V}" = Revenue ~ V,
+  "{V,T}" = Revenue ~ V + Theaters,
+  "{U}" = Revenue ~ U,
+  "{U,T}" = Revenue ~ U + Theaters,
+  "{V,U,R,E}" = Revenue ~ V + U + R + E,
+  "{V,U,R,E,T}" = Revenue ~ V + U + R + E + Theaters
+)
+
+time_points3 <- seq(-30, 10, by = 1)
+
+r2_df <- dplyr::bind_rows(lapply(time_points3, function(t) {
+  df_t <- get_at_time(t, preds312, index312)
+
+  vals <- sapply(model_specs, function(fml) {
+    cv_r2_fixedfolds(fml, df_t, base_folds_312)
+  })
+
+  tibble::tibble(
+    t = t,
+    Model = names(vals),
+    r2 = as.numeric(vals)
+  )
+}))
+
+# Match the line-style logic of the paper:
+# dotted = simpler model, solid = corresponding augmented model
+fig3_colors <- c(
+  "{T}" = "#8c8c8c",
+  "{V}" = "#4C5BD4",
+  "{V,T}" = "#4C5BD4",
+  "{U}" = "#D65F5F",
+  "{U,T}" = "#D65F5F",
+  "{V,U,R,E}" = "#53C36B",
+  "{V,U,R,E,T}" = "#53C36B"
+)
+
+fig3_lty <- c(
+  "{T}" = "dashed",
+  "{V}" = "dotted",
+  "{V,T}" = "solid",
+  "{U}" = "dotted",
+  "{U,T}" = "solid",
+  "{V,U,R,E}" = "dotted",
+  "{V,U,R,E,T}" = "solid"
+)
+
+fig3_order <- c("{T}", "{V}", "{V,T}", "{U}", "{U,T}", "{V,U,R,E}", "{V,U,R,E,T}")
+r2_df$Model <- factor(r2_df$Model, levels = fig3_order)
+
+ggplot(r2_df, aes(x = t, y = r2, color = Model, linetype = Model)) +
+  geom_line(linewidth = 0.7) +
+  scale_color_manual(values = fig3_colors) +
+  scale_linetype_manual(values = fig3_lty) +
+  scale_x_continuous(
+    limits = c(-30, 10),
+    breaks = c(-30, -20, -10, 0, 10),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(0.35, 0.80),
+    breaks = c(0.35, 0.4, 0.5, 0.6, 0.7, 0.8),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Time (day)",
+    y = expression(R^2(t)),
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    legend.position = c(0.86, 0.18),
+    legend.text = element_text(size = 9),
+    legend.key.width = unit(1.4, "cm"),
+    legend.key.height = unit(0.45, "cm"),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.line = element_blank()
+  )
+
+cat("Figure 3 Replication: Cross-validated R² of the linear regression model as a function of prediction time (movie time, days). Each line corresponds to a different set of input variables. The dashed gray line shows the benchmark model based solely on number of theaters (T). 10-fold cross-validation on n=312 movies.\n")
+```
+
+
+
+```{r figure4, fig.cap="Figure 4 Replication: Comparison with the Twitter-based prediction of Asur & Huberman on the same 24-movie subsample. The Wikipedia model (V+U+E+R+T) uses in-sample R² to match the Asur & Huberman evaluation protocol (same sample used as both training and test set). The red triangle marks the Twitter model's R²=0.98 at release night (day 0).", fig.width=7, fig.height=4.5}
+
+# Load 24-movie index and predictors
+index24 <- read.table(index_path24, sep = "\t", header = TRUE, quote = "")
+colnames(index24) <- c("ID", "Title", "WP_title", "Revenue", "Theaters",
+                       "Release_date")
+
+preds24 <- load_all_predictors(index24$ID, pred_dir_24)
+
+# In-sample R^2 (same sample used as both training and test),
+# matching the comparison protocol described in the paper
+insample_r2 <- function(fml, dat) {
+  dat <- dat[complete.cases(dat), , drop = FALSE]
+  if (nrow(dat) < 3) return(NA_real_)
+  summary(lm(fml, data = dat))$r.squared
+}
+
+# Wikipedia line over time
+# The paper's displayed window is about -30 to +10
+time_points4 <- seq(-30, 10, by = 1)
+
+# Full Wikipedia model used in the paper comparison
+# (same "full" Wikipedia model used elsewhere)
+wiki_r2_24 <- sapply(time_points4, function(t) {
+  df_t <- get_at_time(t, preds24, index24)
+  insample_r2(Revenue ~ V + U + R + E + Theaters, df_t)
+})
+
+wiki_df4 <- data.frame(
+  t = time_points4,
+  r2 = wiki_r2_24
+)
+
+# Top panel: main Wikipedia line + Twitter benchmark at 0.98
+p4_top <- ggplot(wiki_df4, aes(x = t, y = r2)) +
+  geom_line(linewidth = 0.6, color = "black") +
+  # Twitter result shown as dotted reference at day 0 / R^2=0.98
+  geom_segment(aes(x = 0, xend = 10, y = 0.98, yend = 0.98),
+               linetype = "dotted", linewidth = 0.5, color = "gray50") +
+  geom_segment(aes(x = 0, xend = 0, y = 0.92, yend = 0.98),
+               linetype = "dotted", linewidth = 0.5, color = "gray50") +
+  scale_x_continuous(
+    limits = c(-30, 10),
+    breaks = c(-30, -25, -20, -15, -10, -5, 0, 5, 10),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(0.92, 0.98),
+    breaks = c(0.92, 0.94, 0.96, 0.98),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = NULL,
+    y = expression(R^2(t))
+  ) +
+  annotate("text", x = -26, y = 0.979,
+           label = "Wikipedia-based method", hjust = 0, vjust = 1, size = 4.2) +
+  annotate("segment", x = -11, xend = -7.2, y = 0.979, yend = 0.979,
+           linewidth = 0.5, color = "black") +
+  annotate("text", x = -24, y = 0.9735,
+           label = "Twitter-based method", hjust = 0, vjust = 1, size = 4.2) +
+  annotate("segment", x = -10.5, xend = -6.8, y = 0.9735, yend = 0.9735,
+           linewidth = 0.5, color = "gray50", linetype = "dotted") +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.line = element_blank()
+  )
+
+# Bottom panel: broken-axis lower strip (0 to 0.02), as in the paper
+p4_bottom <- ggplot() +
+  geom_segment(aes(x = 0, xend = 0, y = 0, yend = 0.02),
+               linetype = "dotted", linewidth = 0.5, color = "gray50") +
+  scale_x_continuous(
+    limits = c(-30, 10),
+    breaks = c(-30, -25, -20, -15, -10, -5, 0, 5, 10),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 0.02),
+    breaks = c(0, 0.02),
+    labels = c("0", "0.02"),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Time (days)",
+    y = NULL
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),
+    axis.line = element_blank()
+  )
+
+# Combine with patchwork
+p4_top / p4_bottom + plot_layout(heights = c(4, 1))
+
+cat("Figure 4 Replication: Comparison of the Wikipedia-based method with the Twitter-based benchmark on the 24-movie subsample. The Wikipedia line shows in-sample R² over time using the same sample as both training and test set. The dotted reference marks the Twitter-based result of R² = 0.98 at release night (day 0).\n")
+```
+
+
+```{r figure5, fig.cap="Figure 5 Replication: First weekend box office revenue in the U.S. against its predicted value by the Wikipedia model at t = −30 days. Green squares represent the 24-movie subsample common to Twitter and Wikipedia studies; black squares are all 312 movies. Negative predicted revenues (very unpopular movies) are omitted from the log scale.", fig.width=5, fig.height=5}
+set.seed(2013)
+
+df_fig5 <- get_at_time(-30, preds312, index312)
+df_fig5$ID <- index312$ID
+df_fig5 <- df_fig5[complete.cases(df_fig5), , drop = FALSE]
+df_fig5$in_24 <- df_fig5$ID %in% index24$ID
+
+cat("Movies in full sample:", nrow(df_fig5), "\n")
+
+# 10-fold CV predictions (paper: "trained on 9 subsets, tested on 10th, averaged over permutations")
+n5     <- nrow(df_fig5)
+folds5 <- sample(rep(seq_len(10), length.out = n5))
+y_hat5 <- numeric(n5)
+for (fold in seq_len(10)) {
+  train <- df_fig5[folds5 != fold, ]
+  test  <- df_fig5[folds5 == fold, ]
+  fit   <- lm(Revenue ~ V + U + R + E + Theaters, data = train)
+  y_hat5[folds5 == fold] <- predict(fit, newdata = test)
+}
+df_fig5$Predicted_USD <- y_hat5
+df_fig5$Actual_USD    <- df_fig5$Revenue
+
+# Only remove points that cannot be shown on log scale
+plot_df <- subset(df_fig5, Predicted_USD > 0 & Actual_USD > 0)
+df312   <- subset(plot_df, !in_24)
+df24    <- subset(plot_df,  in_24)
+
+cat("Movies shown:", nrow(plot_df), "\n")
+cat("Dropped (negative prediction):", nrow(df_fig5) - nrow(plot_df), "\n")
+
+ticks       <- 10^(3:9)
+tick_labels <- parse(text = paste0("10^", 3:9))
+
+par(mar = c(4.8, 4.8, 1.2, 1.2))
+plot(df312$Predicted_USD, df312$Actual_USD,
+     log = "xy", xlim = c(1e3, 1e9), ylim = c(1e3, 1e9),
+     type = "n", xaxt = "n", yaxt = "n",
+     xlab = "Predicted revenue (USD)", ylab = "Actual revenue (USD)")
+axis(1, at = ticks, labels = tick_labels)
+axis(2, at = ticks, labels = tick_labels, las = 1)
+box()
+
+abline(0, 1, col = "#ff4d4d", lty = 3, lwd = 1.2)
+
+points(df312$Predicted_USD, df312$Actual_USD,
+       pch = 15, cex = 0.55, col = "#4a4a4a")
+points(df24$Predicted_USD, df24$Actual_USD,
+       pch = 15, cex = 0.65, col = "#32ef32")
+
+legend("bottomright",
+       legend = c("Sample of 312 movies",
+                  "Sample of 24 movies (from Twitter-based study)",
+                  "Ideal prediction"),
+       pch = c(15, 15, NA),
+       lty = c(NA, NA, 3),
+       lwd = c(NA, NA, 1.2),
+       col = c("#4a4a4a", "#32ef32", "#ff4d4d"),
+       pt.cex = c(0.7, 0.8, NA),
+       bty = "n", cex = 0.82)
+```
+
+
+
+
+
 
 ## 3.2 Extension Results
 
